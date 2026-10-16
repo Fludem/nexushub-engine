@@ -80,9 +80,17 @@ See also: public Engine review repo [`nexushub-engine`](https://github.com/R1GAS
 - `/engine` and `/activity` report **active upstream hosts** (hostname only; no query strings).
 - Kinds: `proxy`, `logo`, `resolve`, `remux`.
 - Settings shows the active list (polls while online) and build identity when present.
-- **Stop Engine** → `POST /quit` (session token / allowlisted origin). GET still accepted for older clients.
-- **Stop remux** → `/remux/stop` (kills the FFmpeg child only).
-- Opt-in tray (`NEXUSHUB_ENGINE_TRAY=1`) receives the session token via env and quits with `POST` + `X-NexusHub-Token`. Status starts at “Checking…”, verifies `/health?json=1` (name + pid), and disposes GDI resources on exit.
+- **Stop Engine** → `POST /quit` only; **session token required** (allowlisted Origin alone cannot quit). Origin, if sent, must still be allowlisted.
+- **Stop remux** → `/remux/stop` (token required).
+- `/activity` requires the session token (same bar as media control).
+- Opt-in tray (`NEXUSHUB_ENGINE_TRAY=1`) receives the session token via env and quits with `POST` + `X-NexusHub-Token`. Health checks **fail closed** on `/health?json=1` identity; tray stays open if quit fails.
+
+## Hardening follow-ups (post v0.4.7 review)
+
+- Web origins: **exact allowlist only** (no “any localhost port”).
+- Packaged builds **refuse non-loopback bind** unless `NEXUSHUB_ENGINE_ALLOW_LAN=1`.
+- Upstream fetches have a wall-clock deadline (`NEXUSHUB_PROXY_TOTAL_MS`, default 5 minutes) in addition to idle/connect timeouts.
+- Residual risks documented: DNS rebinding TOCTOU (validate-then-connect), HLS tokens in query strings (required for media elements), bounded in-memory buffering for `/proxy` bodies.
 
 ## Phase 5 (implemented) — reproducible release artifacts
 

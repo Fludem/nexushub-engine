@@ -15,11 +15,11 @@ Verification files are **GitHub Release assets**, not paths on the `main` branch
 | `VERIFY.md` | Per-release commit / builtAt / hash copy |
 | `NexusHub-Desktop-Engine-<version>.cdx.json` | CycloneDX SBOM |
 
-Example (replace the tag):
+Example (replace the tag; binaries live on the public Engine repo):
 
-- https://github.com/R1GAS/nexushub/releases/tag/v0.4.6
-- https://github.com/R1GAS/nexushub/releases/download/v0.4.6/VERIFY.md
-- https://github.com/R1GAS/nexushub/releases/download/v0.4.6/NexusHub-Desktop-Engine.exe.sha256
+- https://github.com/R1GAS/nexushub-engine/releases/tag/v0.4.8
+- https://github.com/R1GAS/nexushub-engine/releases/download/v0.4.8/VERIFY.md
+- https://github.com/R1GAS/nexushub-engine/releases/download/v0.4.8/NexusHub-Desktop-Engine.zip.sha256
 
 Stable process docs also live in this repo: [`ENGINE-SECURITY.md`](./ENGINE-SECURITY.md).
 

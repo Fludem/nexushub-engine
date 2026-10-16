@@ -17,10 +17,36 @@ const buildMeta = require("./engine-build-meta");
 
 const PORT = Number(process.env.NEXUSHUB_PROXY_PORT || 8787);
 const HOST = process.env.NEXUSHUB_PROXY_HOST || "127.0.0.1";
-/** Per-process secret — required on /proxy /remux /resolve /logo (not on /health). */
+/** Opt-in: allow binding beyond loopback (dangerous — LAN exposure). */
+const ALLOW_LAN_BIND = process.env.NEXUSHUB_ENGINE_ALLOW_LAN === "1";
+/** Per-process secret — required on /proxy /remux /resolve /logo /quit /activity (not on /health). */
 const SESSION_TOKEN = sec.generateSessionToken();
 const upstreamGate = sec.createConcurrencyGate();
-const ENGINE_VERSION = String(buildMeta.version || "0.4.5");
+const ENGINE_VERSION = String(buildMeta.version || "0.4.8");
+
+function isLoopbackBindHost(host) {
+  const h = String(host || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "");
+  return h === "127.0.0.1" || h === "::1" || h === "localhost";
+}
+
+function assertSafeBindHost() {
+  if (isLoopbackBindHost(HOST)) return;
+  if (ALLOW_LAN_BIND) {
+    console.warn(
+      `WARNING: NEXUSHUB_PROXY_HOST=${HOST} is not loopback. Engine is reachable beyond this machine. Set only if you understand the risk.`
+    );
+    return;
+  }
+  const msg = `Refusing non-loopback bind (${HOST}). Use 127.0.0.1 (default) or set NEXUSHUB_ENGINE_ALLOW_LAN=1 to override.`;
+  if (process.pkg) {
+    console.error(msg);
+    process.exit(1);
+  }
+  console.warn(`${msg} (dev warning — packaged builds exit)`);
+}
 
 /** Phase 4: in-flight upstream ops (host only — no query / credentials). */
 const activeOps = new Map();
@@ -183,6 +209,7 @@ function startTrayIcon() {
     const trayEnv = {
       ...process.env,
       NEXUSHUB_TRAY_TOKEN: SESSION_TOKEN,
+      NEXUSHUB_FRONTEND_URL: process.env.NEXUSHUB_FRONTEND_URL || "http://localhost:3000/",
     };
     trayProc = spawn(
       "powershell.exe",
@@ -263,22 +290,11 @@ function requestOrigin(req) {
   return originFromReferer(req.headers && req.headers.referer);
 }
 
-function isLoopbackWebOrigin(origin) {
-  try {
-    const u = new URL(String(origin || ""));
-    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
-    return /^(localhost|127\.0\.0\.1|\[::1\])$/i.test(u.hostname);
-  } catch {
-    return false;
-  }
-}
-
 function isAllowedWebOrigin(origin) {
   if (!origin) return false;
   const o = String(origin).replace(/\/$/, "");
-  if (ALLOWED_ORIGINS.includes(o)) return true;
-  // Proxy is loopback-only — any localhost / 127.0.0.1 page (Live Server, :8787 static, etc.) is fine.
-  return isLoopbackWebOrigin(o);
+  // Exact allowlist only — no “any localhost port” trust (avoids random local pages minting tokens).
+  return ALLOWED_ORIGINS.includes(o);
 }
 
 /**
@@ -371,12 +387,25 @@ function rewriteM3u8(text, baseUrl) {
 /** Slow panels / huge m3u_plus lists often need >30s TTFB; PowerShell waits longer by default. */
 const UPSTREAM_TIMEOUT_MS = Number(process.env.NEXUSHUB_PROXY_TIMEOUT_MS || 180000);
 const UPSTREAM_IDLE_MS = Number(process.env.NEXUSHUB_PROXY_IDLE_MS || 60000);
+/** Hard wall clock for a single upstream fetch (including redirects). */
+const UPSTREAM_TOTAL_MS = Number(process.env.NEXUSHUB_PROXY_TOTAL_MS || 300000);
 
 async function fetchUpstream(targetUrl, redirectsLeft = sec.MAX_REDIRECTS, kind = "proxy") {
   const opId = beginOp(kind, targetUrl);
   await upstreamGate.acquire();
   try {
-    return await fetchUpstreamInner(targetUrl, redirectsLeft);
+    const work = fetchUpstreamInner(targetUrl, redirectsLeft);
+    if (!UPSTREAM_TOTAL_MS || UPSTREAM_TOTAL_MS <= 0) return await work;
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Upstream total deadline exceeded")), UPSTREAM_TOTAL_MS);
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([work, timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   } finally {
     upstreamGate.release();
     endOp(opId);
@@ -600,8 +629,8 @@ const MAC_INFO_PLIST = `<?xml version="1.0" encoding="UTF-8"?>
 <dict>
   <key>CFBundleName</key><string>NexusHub Desktop Engine</string>
   <key>CFBundleIdentifier</key><string>com.nexushub.desktop-engine</string>
-  <key>CFBundleVersion</key><string>0.4.3</string>
-  <key>CFBundleShortVersionString</key><string>0.4.3</string>
+  <key>CFBundleVersion</key><string>0.4.8</string>
+  <key>CFBundleShortVersionString</key><string>0.4.8</string>
   <key>CFBundleExecutable</key><string>NexusHub-Desktop-Engine</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSUIElement</key><false/>
@@ -686,6 +715,7 @@ function printDiagnostics() {
     `  builtAt:         ${buildMeta.builtAt || "(local / unpackaged)"}`,
     `  channel:         ${buildMeta.channel || "dev"}`,
     `  bind:            ${HOST}:${PORT}`,
+    `  allowLanBind:    ${ALLOW_LAN_BIND}`,
     `  packaged:        ${Boolean(process.pkg)}`,
     `  platform:        ${process.platform}`,
     `  execPath:        ${process.execPath}`,
@@ -770,17 +800,22 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (reqUrl.pathname === "/quit") {
-    // Prefer POST (tray / Settings). Allow GET for older clients. Always require
-    // session token or an allowlisted web Origin — never open unauthenticated quit.
+    // Token-only shutdown — allowlisted Origin alone must never authorize quit (CSRF).
     const method = String(req.method || "GET").toUpperCase();
-    if (method !== "POST" && method !== "GET" && method !== "HEAD") {
-      send(res, 405, "Use POST or GET\n", { "Content-Type": "text/plain; charset=utf-8", Allow: "GET, POST" }, req, {
+    if (method !== "POST") {
+      send(res, 405, "Use POST\n", { "Content-Type": "text/plain; charset=utf-8", Allow: "POST" }, req, {
         allowUnauthenticated: true,
       });
       return;
     }
-    if (!canUseProxy(req, reqUrl) && !(requestOrigin(req) && isAllowedWebOrigin(requestOrigin(req)))) {
+    if (!hasValidSessionToken(req, reqUrl)) {
       denyProxy(req, res, "token");
+      return;
+    }
+    // Origin, if present, must still be allowlisted (browser-facing extra check).
+    const origin = requestOrigin(req);
+    if (origin && !isAllowedWebOrigin(origin)) {
+      denyProxy(req, res, "origin");
       return;
     }
     send(res, 200, "bye\n", { "Content-Type": "text/plain; charset=utf-8" }, req, {
@@ -848,10 +883,9 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (reqUrl.pathname === "/activity") {
-    // Visibility for Settings — allowlisted Origin or session token.
-    const origin = requestOrigin(req);
-    if (!(origin && isAllowedWebOrigin(origin)) && !hasValidSessionToken(req, reqUrl)) {
-      denyProxy(req, res, "token");
+    // Hostnames / timing — require session token (same bar as media control).
+    if (!canUseProxy(req, reqUrl)) {
+      denyProxy(req, res, hasValidSessionToken(req, reqUrl) ? "origin" : "token");
       return;
     }
     touchClient();
@@ -860,8 +894,7 @@ const server = http.createServer(async (req, res) => {
       200,
       JSON.stringify(snapshotActivity()),
       { "Content-Type": "application/json; charset=utf-8" },
-      req,
-      { allowUnauthenticated: true }
+      req
     );
     return;
   }
@@ -1124,6 +1157,7 @@ async function main() {
     return;
   }
 
+  assertSafeBindHost();
   hideConsoleWindow();
   startIdleWatchdog();
 

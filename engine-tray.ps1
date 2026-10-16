@@ -2,7 +2,8 @@ param(
   [int]$Port = 8787,
   [int]$EnginePid = 0,
   [string]$ExePath = "",
-  [string]$SessionToken = ""
+  [string]$SessionToken = "",
+  [string]$FrontendUrl = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,12 +14,19 @@ Add-Type -AssemblyName System.Drawing
 if (-not $SessionToken) {
   $SessionToken = [string]$env:NEXUSHUB_TRAY_TOKEN
 }
+if (-not $FrontendUrl) {
+  $FrontendUrl = [string]$env:NEXUSHUB_FRONTEND_URL
+}
+if (-not $FrontendUrl) {
+  $FrontendUrl = "http://localhost:3000/"
+}
 
 $script:trayBmp = $null
 $script:trayBrush = $null
 $script:trayFont = $null
 $script:trayIconHandle = [IntPtr]::Zero
 $script:ownIcon = $false
+$script:quitRequested = $false
 
 Add-Type -Namespace NexusTray -Name Native -MemberDefinition @"
   [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true)]
@@ -48,25 +56,26 @@ function Set-TrayStatus([string]$Text) {
   $notify.Text = "NexusHub Engine - $Text"
 }
 
-function Test-EngineAlive {
-  # Prefer identity JSON over bare /health (wrong process on the port).
+function Open-NexusHubFrontend {
+  # Convenience only — not a trust boundary.
   try {
-    $r = Invoke-WebRequest -Uri "$base/health?json=1" -UseBasicParsing -TimeoutSec 1
-    if ($r.StatusCode -ne 200) { return $false }
-    $body = [string]$r.Content
-    if ($body -notmatch 'NexusHub Desktop Engine') { return $false }
-    if ($body -notmatch '"ok"\s*:\s*true') { return $false }
-    if ($EnginePid -gt 0 -and $body -match '"pid"\s*:\s*(\d+)') {
-      if ([int]$Matches[1] -ne $EnginePid) { return $false }
-    }
+    $u = [Uri]$FrontendUrl
+    if ($u.Scheme -ne "http" -and $u.Scheme -ne "https") { return }
+    Start-Process $u.AbsoluteUri
+  } catch {}
+}
+
+function Test-EngineAlive {
+  # Fail closed: require /health?json=1 identity (no plain-text fallback).
+  try {
+    $r = Invoke-RestMethod -Uri "$base/health?json=1" -TimeoutSec 2 -ErrorAction Stop
+    if ($null -eq $r) { return $false }
+    if ($r.ok -ne $true) { return $false }
+    if ([string]$r.name -ne "NexusHub Desktop Engine") { return $false }
+    if ($EnginePid -gt 0 -and [int]$r.pid -ne $EnginePid) { return $false }
     return $true
   } catch {
-    try {
-      $h = Invoke-WebRequest -Uri "$base/health" -UseBasicParsing -TimeoutSec 1
-      return ($h.StatusCode -eq 200 -and ([string]$h.Content) -match 'NexusHub')
-    } catch {
-      return $false
-    }
+    return $false
   }
 }
 
@@ -101,23 +110,28 @@ Set-TrayStatus "Checking… (:$Port)"
 [void]$menu.Items.Add("-")
 
 $open = $menu.Items.Add("Open NexusHub")
-$open.Add_Click({
-  # Convenience only — not a trust boundary.
-  Start-Process "http://localhost:3000/"
-})
+$open.Add_Click({ Open-NexusHubFrontend })
 
 $quit = $menu.Items.Add("Quit Engine")
 $quit.Add_Click({
   try {
     Stop-EngineViaQuit
-  } catch {}
-  try { $timer.Stop() } catch {}
-  $notify.Visible = $false
-  [System.Windows.Forms.Application]::Exit()
+    $script:quitRequested = $true
+    Set-TrayStatus "Shutdown requested…"
+  } catch {
+    [System.Windows.Forms.MessageBox]::Show(
+      "Could not stop NexusHub Engine. It may still be running.`r`n`r`n$($_.Exception.Message)",
+      "NexusHub Engine",
+      [System.Windows.Forms.MessageBoxButtons]::OK,
+      [System.Windows.Forms.MessageBoxIcon]::Warning
+    ) | Out-Null
+    return
+  }
+  # Timer confirms process/health exit before closing the tray.
 })
 
 $notify.ContextMenuStrip = $menu
-$notify.Add_DoubleClick({ Start-Process "http://localhost:3000/" })
+$notify.Add_DoubleClick({ Open-NexusHubFrontend })
 
 try {
   $notify.BalloonTipTitle = "NexusHub Desktop Engine"
@@ -141,9 +155,11 @@ $timer.Add_Tick({
     }
   }
   if (Test-EngineAlive) {
-    Set-TrayStatus "Running (:$Port)"
+    if (-not $script:quitRequested) {
+      Set-TrayStatus "Running (:$Port)"
+    }
   } else {
-    Set-TrayStatus "Stopped (health failed)"
+    Set-TrayStatus $(if ($script:quitRequested) { "Stopped" } else { "Stopped (health failed)" })
     try { $timer.Stop() } catch {}
     $notify.Visible = $false
     [System.Windows.Forms.Application]::Exit()
