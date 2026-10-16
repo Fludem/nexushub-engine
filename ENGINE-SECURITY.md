@@ -2,7 +2,7 @@
 
 Design goal: users should not need to trust intentions. The Engine is a **local media proxy + optional remux helper** bound to the loopback interface. Unexpected privilege or network expansion should be difficult by construction.
 
-See also: public source [`engine-main.js`](https://github.com/R1GAS/nexushub/blob/main/engine-main.js), [`engine-security.js`](https://github.com/R1GAS/nexushub/blob/main/engine-security.js), [`engine-remux.js`](https://github.com/R1GAS/nexushub/blob/main/engine-remux.js).
+See also: public Engine review repo [`nexushub-engine`](https://github.com/R1GAS/nexushub-engine) — [`engine-main.js`](https://github.com/R1GAS/nexushub-engine/blob/main/engine-main.js), [`engine-security.js`](https://github.com/R1GAS/nexushub-engine/blob/main/engine-security.js), [`engine-remux.js`](https://github.com/R1GAS/nexushub-engine/blob/main/engine-remux.js). The full NexusHub app repo is private.
 
 ## What it does
 
