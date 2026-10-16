@@ -59,6 +59,33 @@ function sanitizeFfmpegBinary(candidate) {
   return resolved;
 }
 
+/** FFmpeg shipped next to the Engine .exe (release zip) or in the repo vendor cache (dev). */
+function bundledFfmpegCandidates() {
+  const win = process.platform === "win32";
+  const name = win ? "ffmpeg.exe" : "ffmpeg";
+  const dirs = [];
+  try {
+    // Packaged Engine: ffmpeg.exe sits beside NexusHub-Desktop-Engine.exe after unzip.
+    dirs.push(path.dirname(process.execPath));
+  } catch {
+    /* ignore */
+  }
+  try {
+    // Dev / unpackaged: vendor/ffmpeg-win64 from scripts/fetch-engine-ffmpeg.js
+    dirs.push(path.join(__dirname, "vendor", "ffmpeg-win64"));
+    dirs.push(path.join(__dirname, "..", "vendor", "ffmpeg-win64"));
+  } catch {
+    /* ignore */
+  }
+  try {
+    const local = process.env.LOCALAPPDATA || "";
+    if (local) dirs.push(path.join(local, "NexusHub", "ffmpeg"));
+  } catch {
+    /* ignore */
+  }
+  return dirs.map((dir) => path.join(dir, name));
+}
+
 function resolveFfmpegPath() {
   if (ffmpegPathCache) return ffmpegPathCache;
 
@@ -66,6 +93,15 @@ function resolveFfmpegPath() {
   if (fromEnv) {
     ffmpegPathCache = fromEnv;
     return ffmpegPathCache;
+  }
+
+  // Prefer the copy we ship with the Engine zip (no separate install required).
+  for (const candidate of bundledFfmpegCandidates()) {
+    const ok = sanitizeFfmpegBinary(candidate);
+    if (ok) {
+      ffmpegPathCache = ok;
+      return ffmpegPathCache;
+    }
   }
 
   const win = process.platform === "win32";

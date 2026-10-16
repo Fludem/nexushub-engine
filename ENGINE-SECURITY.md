@@ -15,7 +15,7 @@ See also: public Engine review repo [`nexushub-engine`](https://github.com/R1GAS
 - Bind to `0.0.0.0` by default
 - Proxy to loopback, private LAN, link-local, or cloud metadata addresses
 - Accept arbitrary URL schemes (`file:`, `ftp:`, `javascript:`, …)
-- Download or execute extra binaries at runtime (FFmpeg is discovered on PATH / env only)
+- Download extra binaries at runtime from the network (Windows release ships `ffmpeg.exe` beside the Engine; otherwise PATH / `NEXUSHUB_FFMPEG`)
 - Collect telemetry by default
 
 ## Phase 1 (implemented)
@@ -49,7 +49,7 @@ See also: public Engine review repo [`nexushub-engine`](https://github.com/R1GAS
 | `NEXUSHUB_ALLOWED_ORIGINS` | Comma-separated web origins |
 | `NEXUSHUB_MAX_URL_LENGTH` | Upstream URL length cap |
 | `NEXUSHUB_MAX_REDIRECTS` | Redirect hop cap |
-| `NEXUSHUB_MAX_BUFFER_BYTES` | Max buffered upstream body |
+| `NEXUSHUB_MAX_BUFFER_BYTES` | Max buffered upstream body (HLS playlists / small fetches; media `/proxy` streams) |
 | `NEXUSHUB_MAX_CONCURRENT` | Max parallel upstream fetches |
 
 ## Phase 2 (implemented) — remux lockdown
@@ -58,7 +58,7 @@ See also: public Engine review repo [`nexushub-engine`](https://github.com/R1GAS
 - `/remux` query allowlist: `url`, `token`, `transcode`, `vcodec=h264` — unknown keys → 400.
 - Upstream URL SSRF-checked again inside remux (defense in depth).
 - `spawn(..., { shell: false })`; minimal env; `cwd` = OS temp (pipe-only output, no temp media files).
-- `NEXUSHUB_FFMPEG` must point at a real `ffmpeg` / `ffmpeg.exe` file.
+- Bundled `ffmpeg.exe` (same folder as the Engine) is preferred; else `NEXUSHUB_FFMPEG` / PATH must point at a real `ffmpeg` / `ffmpeg.exe` file.
 - Discovery prefers known paths + `where.exe` (no PowerShell Path scrape).
 - Default remux wall clock **2 hours** (`NEXUSHUB_REMUX_MAX_MS`); child killed on timeout, client disconnect, or Engine shutdown (`stopRemux`).
 
@@ -90,7 +90,7 @@ See also: public Engine review repo [`nexushub-engine`](https://github.com/R1GAS
 - Web origins: **exact allowlist only** (no “any localhost port”).
 - Packaged builds **refuse non-loopback bind** unless `NEXUSHUB_ENGINE_ALLOW_LAN=1`.
 - Upstream fetches have a wall-clock deadline (`NEXUSHUB_PROXY_TOTAL_MS`, default 5 minutes) in addition to idle/connect timeouts.
-- Residual risks documented: DNS rebinding TOCTOU (validate-then-connect), HLS tokens in query strings (required for media elements), bounded in-memory buffering for `/proxy` bodies.
+- Residual risks documented: DNS rebinding TOCTOU (validate-then-connect), HLS tokens in query strings (required for media elements), bounded in-memory buffering for HLS playlists / small `/proxy` bodies (media streams are piped, not fully buffered).
 
 ## Phase 5 (implemented) — reproducible release artifacts
 

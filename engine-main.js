@@ -22,7 +22,7 @@ const ALLOW_LAN_BIND = process.env.NEXUSHUB_ENGINE_ALLOW_LAN === "1";
 /** Per-process secret — required on /proxy /remux /resolve /logo /quit /activity (not on /health). */
 const SESSION_TOKEN = sec.generateSessionToken();
 const upstreamGate = sec.createConcurrencyGate();
-const ENGINE_VERSION = String(buildMeta.version || "0.4.8");
+const ENGINE_VERSION = String(buildMeta.version || "0.4.10");
 
 function isLoopbackBindHost(host) {
   const h = String(host || "")
@@ -549,6 +549,150 @@ function isPlaylist(contentType, body, targetUrl) {
   return head.trimStart().startsWith("#EXTM3U");
 }
 
+function looksLikePlaylistUrl(url) {
+  return /\.m3u8?(?:\?|$)/i.test(String(url || ""));
+}
+
+function pickStreamResponseHeaders(upHeaders) {
+  const out = {};
+  const allow = [
+    "content-type",
+    "content-length",
+    "content-range",
+    "accept-ranges",
+    "content-disposition",
+    "last-modified",
+    "etag",
+  ];
+  for (const key of allow) {
+    const val = upHeaders && (upHeaders[key] ?? upHeaders[key.toLowerCase()]);
+    if (val != null && val !== "") out[key] = val;
+  }
+  if (!out["accept-ranges"] && !out["Accept-Ranges"]) out["Accept-Ranges"] = "bytes";
+  return out;
+}
+
+/**
+ * Stream media through the Engine (no full-body buffer). Forwards Range for seeking.
+ * Playlists must use buffered fetchUpstream + rewriteM3u8 instead.
+ */
+function streamProxyToClient(clientReq, clientRes, targetUrl, redirectsLeft = sec.MAX_REDIRECTS) {
+  return new Promise((resolve, reject) => {
+    sec
+      .assertSafeUpstreamUrl(targetUrl)
+      .then((parsed) => {
+        const lib = parsed.protocol === "https:" ? https : http;
+        const headers = upstreamHeaders(parsed);
+        if (clientReq.headers.range) headers.Range = clientReq.headers.range;
+        if (clientReq.headers["if-range"]) headers["If-Range"] = clientReq.headers["if-range"];
+
+        const upReq = lib.request(parsed, { method: "GET", headers }, (up) => {
+          const status = up.statusCode || 502;
+          if ([301, 302, 303, 307, 308].includes(status) && up.headers.location && redirectsLeft > 0) {
+            up.resume();
+            try {
+              const next = new URL(up.headers.location, parsed).href;
+              streamProxyToClient(clientReq, clientRes, next, redirectsLeft - 1).then(resolve, reject);
+            } catch (error) {
+              reject(error);
+            }
+            return;
+          }
+
+          const type = String(up.headers["content-type"] || "");
+          if (looksLikePlaylistUrl(parsed.href) || looksLikePlaylistUrl(targetUrl) || /mpegurl|m3u8/i.test(type)) {
+            up.resume();
+            const err = new Error("Playlist responses must use buffered proxy rewrite");
+            err.code = "PLAYLIST_NEEDS_BUFFER";
+            reject(err);
+            return;
+          }
+
+          if (status === 458 || status === 884) {
+            up.resume();
+            const err = new Error(`IPTV panel refused this stream (HTTP ${status})`);
+            err.code = "PANEL_REFUSE";
+            err.status = status;
+            reject(err);
+            return;
+          }
+
+          if (clientRes.writableEnded || clientRes.headersSent) {
+            up.resume();
+            resolve();
+            return;
+          }
+
+          console.log(
+            `  ↳ stream ${status} ${type || "octet"} host=${sec.safeLogHost(parsed.href)}${
+              headers.Range ? ` ${headers.Range}` : ""
+            }`
+          );
+
+          clientRes.writeHead(status, {
+            ...corsHeadersFor(clientReq),
+            ...pickStreamResponseHeaders(up.headers || {}),
+            "Cache-Control": "no-store",
+          });
+
+          let settled = false;
+          const settle = (fn, arg) => {
+            if (settled) return;
+            settled = true;
+            fn(arg);
+          };
+          const killUpstream = () => {
+            try {
+              upReq.destroy();
+            } catch {
+              /* ignore */
+            }
+            try {
+              up.destroy();
+            } catch {
+              /* ignore */
+            }
+          };
+
+          up.on("error", (error) => {
+            killUpstream();
+            if (!clientRes.writableEnded) {
+              try {
+                clientRes.destroy();
+              } catch {
+                /* ignore */
+              }
+            }
+            settle(reject, error);
+          });
+          clientRes.on("error", () => {
+            killUpstream();
+            settle(resolve);
+          });
+          clientReq.on("aborted", () => {
+            killUpstream();
+            settle(resolve);
+          });
+          clientRes.on("close", () => {
+            killUpstream();
+            settle(resolve);
+          });
+
+          up.pipe(clientRes);
+          clientRes.on("finish", () => settle(resolve));
+        });
+
+        upReq.setTimeout(UPSTREAM_TIMEOUT_MS, () => {
+          upReq.destroy();
+          reject(new Error("Upstream timeout"));
+        });
+        upReq.on("error", reject);
+        upReq.end();
+      })
+      .catch(reject);
+  });
+}
+
 const PROTOCOL_SCHEME = "nexushub-engine";
 const WIN_PROTOCOL_KEY = `HKCU\\Software\\Classes\\${PROTOCOL_SCHEME}`;
 
@@ -629,8 +773,8 @@ const MAC_INFO_PLIST = `<?xml version="1.0" encoding="UTF-8"?>
 <dict>
   <key>CFBundleName</key><string>NexusHub Desktop Engine</string>
   <key>CFBundleIdentifier</key><string>com.nexushub.desktop-engine</string>
-  <key>CFBundleVersion</key><string>0.4.8</string>
-  <key>CFBundleShortVersionString</key><string>0.4.8</string>
+  <key>CFBundleVersion</key><string>0.4.10</string>
+  <key>CFBundleShortVersionString</key><string>0.4.10</string>
   <key>CFBundleExecutable</key><string>NexusHub-Desktop-Engine</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSUIElement</key><false/>
@@ -1064,6 +1208,44 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     touchClient();
+
+    // HLS playlists must be buffered so segment URLs can be rewritten through /proxy.
+    // Media (VOD MP4, TS segments, etc.) is streamed — no full-body RAM buffer.
+    if (!looksLikePlaylistUrl(target)) {
+      const opId = beginOp("proxy", target);
+      await upstreamGate.acquire();
+      try {
+        await streamProxyToClient(req, res, target);
+        return;
+      } catch (error) {
+        if (error && error.code === "PLAYLIST_NEEDS_BUFFER") {
+          console.log(`  ↳ stream→buffer playlist host=${sec.safeLogHost(target)}`);
+          // Fall through to buffered rewrite path.
+        } else if (error && error.code === "PANEL_REFUSE") {
+          console.log(`  ↳ upstream refuse HTTP ${error.status} host=${sec.safeLogHost(target)}`);
+          if (!res.headersSent) {
+            send(
+              res,
+              502,
+              `IPTV panel refused this stream (HTTP ${error.status}). Close VLC/other IPTV apps (many accounts allow only 1 connection), wait a few seconds, then retry — or Open in VLC.\n`,
+              { "Content-Type": "text/plain; charset=utf-8" },
+              req
+            );
+          }
+          return;
+        } else {
+          console.log(`  ↳ ERROR ${error.message || error} host=${sec.safeLogHost(target)}`);
+          if (!res.headersSent) {
+            send(res, 502, `Proxy error: ${error.message || error}\n`, { "Content-Type": "text/plain; charset=utf-8" }, req);
+          }
+          return;
+        }
+      } finally {
+        upstreamGate.release();
+        endOp(opId);
+      }
+    }
+
     try {
       const up = await fetchUpstream(target);
       // Provider custom denies (common on Xtream): not real HTTP semantics.
