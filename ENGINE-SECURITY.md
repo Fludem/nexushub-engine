@@ -15,7 +15,7 @@ See also: public Engine review repo [`nexushub-engine`](https://github.com/R1GAS
 - Bind to `0.0.0.0` by default
 - Proxy to loopback, private LAN, link-local, or cloud metadata addresses
 - Accept arbitrary URL schemes (`file:`, `ftp:`, `javascript:`, …)
-- Download extra binaries at runtime from the network (Windows release ships `ffmpeg.exe` beside the Engine; otherwise PATH / `NEXUSHUB_FFMPEG`)
+- Download extra binaries at runtime from the network (Windows release ships `ffmpeg.exe` beside the Engine / installer; otherwise PATH / `NEXUSHUB_FFMPEG`). FFmpeg licensing notes: [`docs/ENGINE-FFMPEG-LICENSING.md`](./docs/ENGINE-FFMPEG-LICENSING.md).
 - Collect telemetry by default
 
 ## Phase 1 (implemented)
@@ -66,7 +66,7 @@ See also: public Engine review repo [`nexushub-engine`](https://github.com/R1GAS
 
 - **No auto protocol registration** on startup.
 - Console stays **visible** unless `NEXUSHUB_ENGINE_HIDE=1`.
-- Tray icon only if `NEXUSHUB_ENGINE_TRAY=1` (off by default).
+- Tray icon **on by default** on Windows (start/stop balloon tips). Set `NEXUSHUB_ENGINE_TRAY=0` to disable.
 - Protocol register/unregister via:
   - CLI: `--register-protocol` / `--unregister-protocol`
   - HTTP (session token): `/protocol/register` · `/protocol/unregister` · `/protocol/status`

@@ -56,6 +56,18 @@ function Set-TrayStatus([string]$Text) {
   $notify.Text = "NexusHub Engine - $Text"
 }
 
+function Show-EngineBalloon([string]$Text, [string]$Icon = "Info") {
+  try {
+    $notify.BalloonTipTitle = "NexusHub Desktop Engine"
+    $notify.BalloonTipText = $Text
+    $tip = [System.Windows.Forms.ToolTipIcon]::Info
+    if ($Icon -eq "Warning") { $tip = [System.Windows.Forms.ToolTipIcon]::Warning }
+    elseif ($Icon -eq "Error") { $tip = [System.Windows.Forms.ToolTipIcon]::Error }
+    $notify.BalloonTipIcon = $tip
+    $notify.ShowBalloonTip(4000)
+  } catch {}
+}
+
 function Open-NexusHubFrontend {
   # Convenience only — not a trust boundary.
   try {
@@ -133,12 +145,20 @@ $quit.Add_Click({
 $notify.ContextMenuStrip = $menu
 $notify.Add_DoubleClick({ Open-NexusHubFrontend })
 
-try {
-  $notify.BalloonTipTitle = "NexusHub Desktop Engine"
-  $notify.BalloonTipText = "Starting on 127.0.0.1:$Port — right-click tray icon to quit"
-  $notify.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
-  $notify.ShowBalloonTip(2500)
-} catch {}
+Show-EngineBalloon "Started — listening on 127.0.0.1:$Port. Right-click this tray icon to quit."
+$script:announcedRunning = $false
+$script:stopBalloonShown = $false
+
+function Stop-TrayWithNotice([string]$Reason) {
+  if (-not $script:stopBalloonShown) {
+    $script:stopBalloonShown = $true
+    Show-EngineBalloon "Stopped — $Reason" "Warning"
+    Start-Sleep -Milliseconds 1200
+  }
+  try { $timer.Stop() } catch {}
+  $notify.Visible = $false
+  [System.Windows.Forms.Application]::Exit()
+}
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 2000
@@ -148,21 +168,20 @@ $timer.Add_Tick({
       Get-Process -Id $EnginePid -ErrorAction Stop | Out-Null
     } catch {
       Set-TrayStatus "Stopped (process exited)"
-      try { $timer.Stop() } catch {}
-      $notify.Visible = $false
-      [System.Windows.Forms.Application]::Exit()
+      Stop-TrayWithNotice "Engine exited (site left or Stop pressed)."
       return
     }
   }
   if (Test-EngineAlive) {
     if (-not $script:quitRequested) {
       Set-TrayStatus "Running (:$Port)"
+      if (-not $script:announcedRunning) {
+        $script:announcedRunning = $true
+      }
     }
   } else {
     Set-TrayStatus $(if ($script:quitRequested) { "Stopped" } else { "Stopped (health failed)" })
-    try { $timer.Stop() } catch {}
-    $notify.Visible = $false
-    [System.Windows.Forms.Application]::Exit()
+    Stop-TrayWithNotice $(if ($script:quitRequested) { "Quit from tray or site." } else { "Engine is no longer responding." })
   }
 })
 $timer.Start()

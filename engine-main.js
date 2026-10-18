@@ -127,10 +127,15 @@ const ALLOWED_ORIGINS = String(
 const IDLE_MS = Number(process.env.NEXUSHUB_ENGINE_IDLE_MS || 45000);
 const STARTUP_GRACE_MS = Number(process.env.NEXUSHUB_ENGINE_STARTUP_GRACE_MS || 180000);
 const STAY_ALIVE = process.env.NEXUSHUB_ENGINE_STAY === "1";
-/** Phase 3: console stays visible unless explicitly hidden. */
+/** Console stays hidden for packaged GUI builds unless NEXUSHUB_ENGINE_HIDE=0 and a console exists. */
 const HIDE_CONSOLE = process.env.NEXUSHUB_ENGINE_HIDE === "1";
-/** Phase 3: tray / notification only when opted in. */
-const ENABLE_TRAY = process.env.NEXUSHUB_ENGINE_TRAY === "1";
+/** Tray + start/stop balloons on by default (Windows). Set NEXUSHUB_ENGINE_TRAY=0 (or NO_TRAY=1) to disable. */
+const ENABLE_TRAY = (() => {
+  if (process.env.NEXUSHUB_ENGINE_NO_TRAY === "1") return false;
+  if (process.env.NEXUSHUB_ENGINE_TRAY === "0") return false;
+  if (process.env.NEXUSHUB_ENGINE_TRAY === "1") return true;
+  return process.platform === "win32";
+})();
 const ARGV = process.argv.slice(2);
 const startedAt = Date.now();
 let lastClientAt = 0;
@@ -191,8 +196,7 @@ function notifyEngineStarted() {
 }
 
 function startTrayIcon() {
-  // Phase 3: opt-in only (NEXUSHUB_ENGINE_TRAY=1). Legacy NO_TRAY=1 still forces off.
-  if (!ENABLE_TRAY || process.env.NEXUSHUB_ENGINE_NO_TRAY === "1") return;
+  if (!ENABLE_TRAY) return;
   if (process.platform === "darwin") {
     notifyEngineStarted();
     return;
@@ -865,7 +869,7 @@ function printDiagnostics() {
     `  execPath:        ${process.execPath}`,
     `  sessionToken:    (generated at runtime; not printed)`,
     `  hideConsole:     ${HIDE_CONSOLE} (set NEXUSHUB_ENGINE_HIDE=1 to hide)`,
-    `  tray:            ${ENABLE_TRAY} (set NEXUSHUB_ENGINE_TRAY=1 to enable)`,
+    `  tray:            ${ENABLE_TRAY} (Windows on by default; set NEXUSHUB_ENGINE_TRAY=0 to disable)`,
     `  protocolScheme:  ${PROTOCOL_SCHEME}://`,
     `  protocolReg:     ${isProtocolRegistered() ? "registered (HKCU)" : "not registered"}`,
     `  wouldRegister:   ${process.platform === "win32" ? protocolCommandWindows() : "(n/a)"}`,
