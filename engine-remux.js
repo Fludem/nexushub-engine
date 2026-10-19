@@ -197,6 +197,8 @@ function getRemuxCapabilities() {
   };
 }
 
+const FFMPEG_PROTOCOLS = "http,https,tcp,tls,crypto";
+
 /** Fixed templates only — never built from user query strings. */
 function buildFfmpegArgs(targetUrl, { transcodeVideo = false } = {}) {
   const videoArgs = transcodeVideo
@@ -207,6 +209,9 @@ function buildFfmpegArgs(targetUrl, { transcodeVideo = false } = {}) {
     "-loglevel",
     "error",
     "-nostdin",
+    // FFmpeg fetches nested URLs itself (HLS segments, keys); never let them reach file:/pipe:/etc.
+    "-protocol_whitelist",
+    FFMPEG_PROTOCOLS,
     "-user_agent",
     process.env.NEXUSHUB_PROXY_UA || "VLC/3.0.20 LibVLC/3.0.20",
     "-i",

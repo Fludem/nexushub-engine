@@ -427,6 +427,7 @@ function fetchUpstreamInner(targetUrl, redirectsLeft) {
           {
             method: "GET",
             headers: upstreamHeaders(parsed),
+            lookup: sec.safeLookup,
           },
           (up) => {
             req.setTimeout(UPSTREAM_IDLE_MS);
@@ -509,6 +510,7 @@ function resolveRedirectsInner(targetUrl, redirectsLeft) {
           {
             method: "GET",
             headers: upstreamHeaders(parsed),
+            lookup: sec.safeLookup,
           },
           (up) => {
             const status = up.statusCode || 502;
@@ -590,7 +592,7 @@ function streamProxyToClient(clientReq, clientRes, targetUrl, redirectsLeft = se
         if (clientReq.headers.range) headers.Range = clientReq.headers.range;
         if (clientReq.headers["if-range"]) headers["If-Range"] = clientReq.headers["if-range"];
 
-        const upReq = lib.request(parsed, { method: "GET", headers }, (up) => {
+        const upReq = lib.request(parsed, { method: "GET", headers, lookup: sec.safeLookup }, (up) => {
           const status = up.statusCode || 502;
           if ([301, 302, 303, 307, 308].includes(status) && up.headers.location && redirectsLeft > 0) {
             up.resume();

@@ -32,8 +32,11 @@ See also: public Engine review repo [`nexushub-engine`](https://github.com/R1GAS
 
 - Only `http:` and `https:` upstreams.
 - No URL userinfo.
-- DNS resolution is checked; loopback, RFC1918, link-local, CGNAT, and metadata ranges are blocked.
+- DNS resolution is checked; loopback, RFC1918, link-local, CGNAT, metadata, benchmarking/TEST-NET, multicast and reserved ranges are blocked.
+- IPv6 is checked by parsed address, not string prefix: `::/96`, ULA, all of `fe80::/10`, site-local, Teredo, documentation and multicast are blocked, and IPv4 embedded in IPv6 (`::ffff:0:0/96` mapped, `64:ff9b::/96` NAT64, `2002::/16` 6to4) is checked against the IPv4 list. (Before this, `http://[::ffff:127.0.0.1]/` passed the filter because URL parsing normalises it to `[::ffff:7f00:1]`.)
 - Redirects are re-validated on every hop.
+- Engine sockets connect through a validating `lookup` (`safeLookup`), so the address actually dialled is the one that was checked (closes DNS rebinding between check and connect for `/proxy`, `/logo`, `/resolve`).
+- FFmpeg inputs are limited to `-protocol_whitelist http,https,tcp,tls,crypto`, so nested playlist / key URLs cannot reach `file:`, `pipe:` etc.
 
 ### Limits
 
@@ -90,7 +93,7 @@ See also: public Engine review repo [`nexushub-engine`](https://github.com/R1GAS
 - Web origins: **exact allowlist only** (no “any localhost port”).
 - Packaged builds **refuse non-loopback bind** unless `NEXUSHUB_ENGINE_ALLOW_LAN=1`.
 - Upstream fetches have a wall-clock deadline (`NEXUSHUB_PROXY_TOTAL_MS`, default 5 minutes) in addition to idle/connect timeouts.
-- Residual risks documented: DNS rebinding TOCTOU (validate-then-connect), HLS tokens in query strings (required for media elements), bounded in-memory buffering for HLS playlists / small `/proxy` bodies (media streams are piped, not fully buffered).
+- Residual risks documented: FFmpeg does its own DNS and follows redirects / HLS segment URLs itself, so `/remux` (and `/probe`) only validate the first URL (validate-then-connect); HLS tokens in query strings (required for media elements), bounded in-memory buffering for HLS playlists / small `/proxy` bodies (media streams are piped, not fully buffered).
 
 ## Phase 5 (implemented) — reproducible release artifacts
 

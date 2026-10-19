@@ -73,3 +73,62 @@ test("createConcurrencyGate caps parallel holders and hands off in order", async
   assert.equal(second, true);
   assert.equal(gate.active(), 1);
 });
+
+test("isBlockedIp blocks IPv4 hidden inside IPv6 (mapped, NAT64, 6to4)", () => {
+  for (const ip of [
+    "::ffff:7f00:1", // WHATWG URL normalises [::ffff:127.0.0.1] to this
+    "::ffff:a9fe:a9fe", // 169.254.169.254
+    "::ffff:c0a8:101", // 192.168.1.1
+    "0:0:0:0:0:ffff:127.0.0.1",
+    "64:ff9b::7f00:1",
+    "64:ff9b::10.0.0.1",
+    "2002:7f00:1::1",
+    "2002:c0a8:0101::",
+  ]) {
+    assert.equal(sec.isBlockedIp(ip), true, ip);
+  }
+  assert.equal(sec.isBlockedIp("::ffff:808:808"), false, "mapped public 8.8.8.8");
+  assert.equal(sec.isBlockedIp("64:ff9b::808:808"), false, "NAT64 public 8.8.8.8");
+});
+
+test("isBlockedIp blocks the full special-purpose IPv6 ranges, not just string prefixes", () => {
+  for (const ip of [
+    "0:0:0:0:0:0:0:1",
+    "::7f00:1", // deprecated IPv4-compatible
+    "febf::1", // still fe80::/10
+    "fec0::1",
+    "2001::1", // Teredo
+    "2001:db8::1",
+    "100::1",
+    "64:ff9b:1::1",
+    "fe80::1%en0",
+  ]) {
+    assert.equal(sec.isBlockedIp(ip), true, ip);
+  }
+});
+
+test("isBlockedIp blocks benchmarking / TEST-NET IPv4 ranges", () => {
+  for (const ip of ["198.18.0.1", "198.19.255.255", "192.0.2.1", "198.51.100.1", "203.0.113.1", "240.0.0.1"]) {
+    assert.equal(sec.isBlockedIp(ip), true, ip);
+  }
+});
+
+test("assertSafeUpstreamUrl rejects IPv6-literal loopback / metadata URLs", async () => {
+  for (const url of [
+    "http://[::ffff:127.0.0.1]:8787/health",
+    "http://[::ffff:169.254.169.254]/latest/meta-data/",
+    "http://[64:ff9b::127.0.0.1]/",
+    "http://[::127.0.0.1]/",
+  ]) {
+    await assert.rejects(sec.assertSafeUpstreamUrl(url), /Blocked/, url);
+  }
+});
+
+test("safeLookup refuses hostnames that resolve to blocked addresses", async () => {
+  const lookup = (opts) =>
+    new Promise((resolve) => sec.safeLookup("localhost", opts, (err, addr) => resolve({ err, addr })));
+  const single = await lookup({});
+  assert.equal(single.err && single.err.code, "EBLOCKED");
+  const all = await lookup({ all: true });
+  assert.equal(all.err && all.err.code, "EBLOCKED");
+});

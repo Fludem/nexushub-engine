@@ -41,3 +41,10 @@ test("sanitizeFfmpegBinary only accepts an existing file named ffmpeg", () => {
   assert.equal(remux.sanitizeFfmpegBinary("/nonexistent/ffmpeg"), "");
   assert.equal(remux.sanitizeFfmpegBinary("ffmpeg\n--evil"), "");
 });
+
+test("buildFfmpegArgs pins FFmpeg input protocols to network-only", () => {
+  const args = remux.buildFfmpegArgs("https://cdn.example/a.m3u8");
+  const i = args.indexOf("-protocol_whitelist");
+  assert.ok(i !== -1 && i < args.indexOf("-i"));
+  assert.equal(args[i + 1], "http,https,tcp,tls,crypto");
+});

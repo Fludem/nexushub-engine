@@ -60,3 +60,11 @@ test("CORS preflight from a disallowed origin is refused", async () => {
   const res = await engine.request("/proxy", { method: "OPTIONS", headers: { Origin: "https://evil.example" } });
   assert.equal(res.status, 403);
 });
+
+test("/proxy refuses IPv4-mapped IPv6 loopback (was an SSRF bypass)", async () => {
+  const self = `http://[::ffff:127.0.0.1]:${engine.port}/health`;
+  const res = await engine.request(`/proxy?url=${enc(self)}&token=${engine.token}`);
+  assert.equal(res.status, 502);
+  assert.match(res.text, /Blocked destination/);
+  assert.doesNotMatch(res.text, /stream proxy OK/);
+});
