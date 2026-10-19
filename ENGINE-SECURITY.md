@@ -63,6 +63,7 @@ See also: public Engine review repo [`nexushub-engine`](https://github.com/R1GAS
 - `spawn(..., { shell: false })`; minimal env; `cwd` = OS temp (pipe-only output, no temp media files).
 - Bundled `ffmpeg.exe` (same folder as the Engine) is preferred; else `NEXUSHUB_FFMPEG` / PATH must point at a real `ffmpeg` / `ffmpeg.exe` file.
 - Discovery prefers known paths + `where.exe` (no PowerShell Path scrape).
+- One FFmpeg process at a time. A new `/remux` stops the running one and takes over (channel switch / seek); the superseded request gets `409` if it had not started streaming. (Previously the second request got `429` until the first FFmpeg exited.)
 - Default remux wall clock **2 hours** (`NEXUSHUB_REMUX_MAX_MS`); child killed on timeout, client disconnect, or Engine shutdown (`stopRemux`).
 
 ## Phase 3 (implemented) — Windows integration is opt-in

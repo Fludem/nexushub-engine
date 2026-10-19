@@ -999,6 +999,8 @@ const server = http.createServer(async (req, res) => {
       remuxBusy: caps.remuxBusy,
       remuxHost: caps.remuxHost || "",
       remuxMaxMs: caps.remuxMaxMs,
+      // A new /remux stops the running one (channel switch / seek) instead of returning 429.
+      remuxReplaces: true,
       activity: activity.active,
       host: HOST,
       port: PORT,

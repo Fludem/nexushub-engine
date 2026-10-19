@@ -11,11 +11,11 @@ const sec = require("./engine-security");
 
 let ffmpegPathCache = null;
 let ffmpegOkCache = null;
-let remuxChild = null;
-let remuxTimer = null;
-/** Hostname only (no query) of the active remux upstream — for Phase 4 visibility. */
-let remuxHost = "";
-let remuxStartedAt = 0;
+/**
+ * The one active remux: { child, timer, host, startedAt }. `host` is hostname only (no query)
+ * for Phase 4 visibility. A new /remux replaces it (channel switch / seek) instead of 429.
+ */
+let session = null;
 
 /** Default 2h (was 6h) — long enough for VOD, not unbounded. */
 const DEFAULT_REMUX_MAX_MS = 2 * 60 * 60 * 1000;
@@ -190,9 +190,9 @@ function getRemuxCapabilities() {
     remux: available,
     ffmpeg: available ? resolveFfmpegPath() : "",
     remuxPath: "/remux?url=",
-    remuxBusy: Boolean(remuxChild),
-    remuxHost: remuxChild ? remuxHost : "",
-    remuxStartedAt: remuxChild ? remuxStartedAt : 0,
+    remuxBusy: Boolean(session),
+    remuxHost: session ? session.host : "",
+    remuxStartedAt: session ? session.startedAt : 0,
     remuxMaxMs: Number(process.env.NEXUSHUB_REMUX_MAX_MS || DEFAULT_REMUX_MAX_MS),
   };
 }
@@ -237,31 +237,23 @@ function buildFfmpegArgs(targetUrl, { transcodeVideo = false } = {}) {
   ];
 }
 
-function stopRemux(reason = "stop") {
-  if (remuxTimer) {
-    try {
-      clearTimeout(remuxTimer);
-    } catch {
-      /* ignore */
-    }
-    remuxTimer = null;
-  }
-  if (!remuxChild) {
-    remuxHost = "";
-    remuxStartedAt = 0;
-    return false;
-  }
-  const child = remuxChild;
-  remuxChild = null;
-  remuxHost = "";
-  remuxStartedAt = 0;
+/** Kill one session's FFmpeg. Only clears `session` if it is still the active one. */
+function stopSession(target, reason) {
+  if (!target || target.stopped) return false;
+  target.stopped = reason || "stop";
+  if (target.timer) clearTimeout(target.timer);
+  if (session === target) session = null;
   try {
-    child.kill("SIGKILL");
+    target.child.kill("SIGKILL");
   } catch {
     /* ignore */
   }
   if (reason) console.log(`  ↳ remux stopped (${reason})`);
   return true;
+}
+
+function stopRemux(reason = "stop") {
+  return stopSession(session, reason);
 }
 
 /**
@@ -283,20 +275,16 @@ async function startRemuxStream(targetUrl, res, baseHeaders = {}, options = {}) 
       error: "FFmpeg not found. Install FFmpeg and ensure it is on PATH, or set NEXUSHUB_FFMPEG to the ffmpeg binary.",
     };
   }
-  if (remuxChild) {
-    return { ok: false, status: 429, error: "Another remux is already running. Try again in a moment." };
-  }
+  if (session) stopSession(session, "replaced");
 
   const transcodeVideo = Boolean(options && options.transcodeVideo);
   const bin = resolveFfmpegPath();
   const args = buildFfmpegArgs(targetUrl, { transcodeVideo });
-  remuxHost = remuxHostOf(targetUrl);
-  remuxStartedAt = Date.now();
-
   let started = false;
   let stderrBuf = "";
+  let child;
   try {
-    remuxChild = spawn(bin, args, {
+    child = spawn(bin, args, {
       windowsHide: true,
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
@@ -311,20 +299,19 @@ async function startRemuxStream(targetUrl, res, baseHeaders = {}, options = {}) 
       },
     });
   } catch (error) {
-    remuxChild = null;
-    remuxHost = "";
-    remuxStartedAt = 0;
     return { ok: false, status: 500, error: String((error && error.message) || error) };
   }
 
-  const cleanup = (why) => stopRemux(why || "cleanup");
+  const own = { child, timer: null, host: remuxHostOf(targetUrl), startedAt: Date.now(), stopped: false };
+  session = own;
+  const cleanup = (why) => stopSession(own, why || "cleanup");
 
-  remuxChild.stderr.on("data", (chunk) => {
+  child.stderr.on("data", (chunk) => {
     stderrBuf += String(chunk || "");
     if (stderrBuf.length > 4000) stderrBuf = stderrBuf.slice(-4000);
   });
 
-  remuxChild.on("error", (error) => {
+  child.on("error", (error) => {
     if (!started && !res.headersSent) {
       res.writeHead(500, {
         ...baseHeaders,
@@ -335,12 +322,13 @@ async function startRemuxStream(targetUrl, res, baseHeaders = {}, options = {}) 
     cleanup("spawn-error");
   });
 
-  remuxChild.on("close", (code) => {
-    if (remuxTimer) {
-      clearTimeout(remuxTimer);
-      remuxTimer = null;
-    }
-    if (!started && !res.headersSent) {
+  child.on("close", (code) => {
+    if (own.timer) clearTimeout(own.timer);
+    if (session === own) session = null;
+    if (!started && !res.headersSent && own.stopped === "replaced") {
+      res.writeHead(409, { ...baseHeaders, "Content-Type": "text/plain; charset=utf-8" });
+      res.end("Remux replaced by a newer request\n");
+    } else if (!started && !res.headersSent) {
       const hint = stderrBuf.trim() || `ffmpeg exited with code ${code}`;
       res.writeHead(502, {
         ...baseHeaders,
@@ -354,16 +342,13 @@ async function startRemuxStream(targetUrl, res, baseHeaders = {}, options = {}) 
         /* ignore */
       }
     }
-    remuxChild = null;
-    remuxHost = "";
-    remuxStartedAt = 0;
   });
 
   res.on("close", () => {
     if (!res.writableEnded) cleanup("client-close");
   });
 
-  remuxChild.stdout.once("data", (chunk) => {
+  child.stdout.once("data", (chunk) => {
     if (started) return;
     started = true;
     res.writeHead(200, {
@@ -372,12 +357,12 @@ async function startRemuxStream(targetUrl, res, baseHeaders = {}, options = {}) 
       "Cache-Control": "no-store",
     });
     res.write(chunk);
-    remuxChild.stdout.pipe(res, { end: true });
+    child.stdout.pipe(res, { end: true });
   });
 
   const maxMs = Number(process.env.NEXUSHUB_REMUX_MAX_MS || DEFAULT_REMUX_MAX_MS);
-  remuxTimer = setTimeout(() => cleanup("timeout"), maxMs);
-  remuxTimer.unref?.();
+  own.timer = setTimeout(() => cleanup("timeout"), maxMs);
+  own.timer.unref?.();
 
   return { ok: true };
 }
