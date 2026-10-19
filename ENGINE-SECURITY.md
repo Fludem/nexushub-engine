@@ -125,7 +125,8 @@ node engine-main.js
 ```
 
 ```bash
-node scripts/test-engine-security.mjs
+npm test                            # node:test suites in test/ (no dependencies)
+node scripts/test-engine-security.mjs   # private app repo
 node engine-main.js --diagnostics   # should show version + commit
 npm run build:engine:win            # SHA-256 + SBOM in engine-dist/
 ```
