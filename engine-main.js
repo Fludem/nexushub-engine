@@ -19,7 +19,7 @@ const PORT = Number(process.env.NEXUSHUB_PROXY_PORT || 8787);
 const HOST = process.env.NEXUSHUB_PROXY_HOST || "127.0.0.1";
 /** Opt-in: allow binding beyond loopback (dangerous — LAN exposure). */
 const ALLOW_LAN_BIND = process.env.NEXUSHUB_ENGINE_ALLOW_LAN === "1";
-/** Per-process secret — required on /proxy /remux /resolve /logo /quit /activity (not on /health). */
+/** Per-process secret — required on /proxy /remux /probe /resolve /logo /quit /activity (not on /health). */
 const SESSION_TOKEN = sec.generateSessionToken();
 const upstreamGate = sec.createConcurrencyGate();
 const ENGINE_VERSION = String(buildMeta.version || "0.4.10");
@@ -877,6 +877,7 @@ function printDiagnostics() {
     `  wouldRegister:   ${process.platform === "win32" ? protocolCommandWindows() : "(n/a)"}`,
     `  ffmpeg:          ${caps.ffmpeg || "(not found)"}`,
     `  remux:           ${caps.remux}`,
+    `  ffprobe:         ${caps.ffprobe || "(not found — /probe disabled)"}`,
     `  allowedOrigins:  ${ALLOWED_ORIGINS.join(", ")}`,
     `  ssrfFilter:      on`,
     `  maxBufferBytes:  ${sec.MAX_BUFFER_BYTES}`,
@@ -1001,6 +1002,10 @@ const server = http.createServer(async (req, res) => {
       remuxMaxMs: caps.remuxMaxMs,
       // A new /remux stops the running one (channel switch / seek) instead of returning 429.
       remuxReplaces: true,
+      // /remux accepts start=<seconds> (input seek; output timestamps restart at 0).
+      remuxSeek: true,
+      probe: caps.probe,
+      probePath: caps.probePath,
       activity: activity.active,
       host: HOST,
       port: PORT,
@@ -1193,14 +1198,47 @@ const server = http.createServer(async (req, res) => {
     }
     touchClient();
     console.log(
-      `  ↳ remux start${parsed.transcodeVideo ? " (h264 transcode)" : ""} host=${sec.safeLogHost(parsed.target)}`
+      `  ↳ remux start${parsed.transcodeVideo ? " (h264 transcode)" : ""}${
+        parsed.startSeconds ? ` @${parsed.startSeconds}s` : ""
+      } host=${sec.safeLogHost(parsed.target)}`
     );
     const result = await remux.startRemuxStream(parsed.target, res, corsHeadersFor(req), {
       transcodeVideo: parsed.transcodeVideo,
+      startSeconds: parsed.startSeconds,
     });
     if (!result.ok) {
       console.log(`  ↳ remux reject ${result.status}: ${result.error}`);
       send(res, result.status, `${result.error}\n`, { "Content-Type": "text/plain; charset=utf-8" }, req);
+    }
+    return;
+  }
+
+  if (reqUrl.pathname === "/probe") {
+    if (!canUseProxy(req, reqUrl)) {
+      denyProxy(req, res, hasValidSessionToken(req, reqUrl) ? "origin" : "token");
+      return;
+    }
+    const parsed = remux.parseProbeQuery(reqUrl.searchParams);
+    if (!parsed.ok) {
+      send(res, parsed.status, JSON.stringify({ ok: false, error: parsed.error }), { "Content-Type": "application/json; charset=utf-8" }, req);
+      return;
+    }
+    touchClient();
+    const opId = beginOp("probe", parsed.target);
+    try {
+      const result = await remux.probeMedia(parsed.target);
+      console.log(
+        `  ↳ probe ${result.ok ? `${result.info.container} ${result.info.duration ?? "?"}s` : `${result.status} ${result.error}`} host=${sec.safeLogHost(parsed.target)}`
+      );
+      send(
+        res,
+        result.ok ? 200 : result.status,
+        JSON.stringify(result.ok ? { ok: true, ...result.info } : { ok: false, error: result.error }),
+        { "Content-Type": "application/json; charset=utf-8" },
+        req
+      );
+    } finally {
+      endOp(opId);
     }
     return;
   }
@@ -1295,7 +1333,7 @@ const server = http.createServer(async (req, res) => {
   send(
     res,
     404,
-    "NexusHub Desktop Engine — use /health /engine /activity /proxy /remux /remux/stop /resolve /ping /quit /protocol/*\n",
+    "NexusHub Desktop Engine — use /health /engine /activity /proxy /remux /remux/stop /probe /resolve /ping /quit /protocol/*\n",
     { "Content-Type": "text/plain; charset=utf-8" },
     req,
     { allowUnauthenticated: true }
@@ -1354,7 +1392,7 @@ async function main() {
   server.listen(PORT, HOST, () => {
     console.log(`NexusHub Desktop Engine on http://${HOST}:${PORT}/`);
     console.log(`Allowed web origins: ${ALLOWED_ORIGINS.join(", ")}`);
-    console.log(`Session auth: required on /proxy /remux /resolve /logo (token via allowlisted /engine)`);
+    console.log(`Session auth: required on /proxy /remux /probe /resolve /logo (token via allowlisted /engine)`);
     console.log(`SSRF filter: on · max buffer ${sec.MAX_BUFFER_BYTES} · concurrency ${sec.MAX_CONCURRENT_UPSTREAM}`);
     console.log(
       `UI: console ${HIDE_CONSOLE ? "hidden" : "visible"} · tray ${ENABLE_TRAY ? "on" : "off"} · protocol ${isProtocolRegistered() ? "registered" : "not registered (opt-in)"}`

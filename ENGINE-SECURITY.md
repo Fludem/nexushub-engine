@@ -8,7 +8,8 @@ See also: public Engine review repo [`nexushub-engine`](https://github.com/R1GAS
 
 - Listen on `127.0.0.1:8787` (override with `NEXUSHUB_PROXY_HOST` / `NEXUSHUB_PROXY_PORT`)
 - Proxy HTTP(S) media / playlists for allowlisted NexusHub web origins
-- Optional FFmpeg remux/transcode of a single upstream URL to browser-playable MP4
+- Optional FFmpeg remux/transcode of a single upstream URL to browser-playable MP4 (seekable via `start=`)
+- Optional `ffprobe` summary of one upstream URL (container, duration, codecs) so the web app can choose direct play / remux / transcode
 
 ## What it must not do
 
@@ -24,7 +25,7 @@ See also: public Engine review repo [`nexushub-engine`](https://github.com/R1GAS
 
 - On startup the Engine generates a random `sessionToken`.
 - `/engine` returns `sessionToken` **only** when the request `Origin` is an allowlisted NexusHub origin (CORS-readable by the web app).
-- `/proxy`, `/remux`, `/resolve`, and `/logo` require that token (`?token=`, `Authorization: Bearer`, or `X-NexusHub-Token`).
+- `/proxy`, `/remux`, `/probe`, `/resolve`, and `/logo` require that token (`?token=`, `Authorization: Bearer`, or `X-NexusHub-Token`).
 - Rewritten HLS playlists embed the token in segment proxy URLs (media elements often omit `Origin`).
 - `/health` stays unauthenticated (liveness only; no token, no upstream fetch).
 
@@ -58,7 +59,9 @@ See also: public Engine review repo [`nexushub-engine`](https://github.com/R1GAS
 ## Phase 2 (implemented) — remux lockdown
 
 - Fixed FFmpeg argument templates only (`copy` or `libx264` + AAC); no user-supplied flags.
-- `/remux` query allowlist: `url`, `token`, `transcode`, `vcodec=h264` — unknown keys → 400.
+- `/remux` query allowlist: `url`, `token`, `transcode`, `vcodec=h264`, `start` — unknown keys → 400.
+- `start` must be plain decimal seconds (≤ 3 decimals, ≤ 24h); it is re-formatted with `toFixed(3)` and passed as `-ss` before `-i` (input seek). Output timestamps restart at 0, so the player adds `start` to `currentTime`. With video copy the cut lands on the keyframe at or before `start`; with `transcode=1` it is frame-exact.
+- `/probe` runs `ffprobe` with a fixed template (`-show_entries … -of json`, same protocol whitelist and UA); query allowlist `url`, `token`. At most 2 probes at once, 20 s kill timer (`NEXUSHUB_PROBE_TIMEOUT_MS`), 1 MB output cap. Response is a summary (`container`, `duration`, `bitRate`, `video[]`, `audio[]`, `subtitles[]`), not raw ffprobe output. `ffprobe` is looked up via `NEXUSHUB_FFPROBE`, then beside the resolved `ffmpeg`, then the bundled/Homebrew paths; when missing, `/probe` returns 503 and `/engine` reports `probe: false`.
 - Upstream URL SSRF-checked again inside remux (defense in depth).
 - `spawn(..., { shell: false })`; minimal env; `cwd` = OS temp (pipe-only output, no temp media files).
 - Bundled `ffmpeg.exe` (same folder as the Engine) is preferred; else `NEXUSHUB_FFMPEG` / PATH must point at a real `ffmpeg` / `ffmpeg.exe` file.
@@ -82,7 +85,7 @@ See also: public Engine review repo [`nexushub-engine`](https://github.com/R1GAS
 ## Phase 4 (implemented) — visibility + stop UX
 
 - `/engine` and `/activity` report **active upstream hosts** (hostname only; no query strings).
-- Kinds: `proxy`, `logo`, `resolve`, `remux`.
+- Kinds: `proxy`, `logo`, `resolve`, `remux`, `probe`.
 - Settings shows the active list (polls while online) and build identity when present.
 - **Stop Engine** → `POST /quit` only; **session token required** (allowlisted Origin alone cannot quit). Origin, if sent, must still be allowlisted.
 - **Stop remux** → `/remux/stop` (token required).

@@ -68,3 +68,29 @@ test("/proxy refuses IPv4-mapped IPv6 loopback (was an SSRF bypass)", async () =
   assert.match(res.text, /Blocked destination/);
   assert.doesNotMatch(res.text, /stream proxy OK/);
 });
+
+test("/probe requires the session token and rejects unknown keys", async () => {
+  const url = enc("https://1.1.1.1/a.mkv");
+  assert.equal((await engine.request(`/probe?url=${url}`)).status, 403);
+  const extra = await engine.request(`/probe?url=${url}&token=${engine.token}&show_data=1`);
+  assert.equal(extra.status, 400);
+});
+
+test("/probe refuses loopback upstreams before spawning ffprobe", async () => {
+  const res = await engine.request(`/probe?url=${enc("http://[::ffff:127.0.0.1]:1/")}&token=${engine.token}`);
+  assert.equal(res.status, 403);
+  assert.equal(JSON.parse(res.text).ok, false);
+});
+
+test("/remux rejects malformed start= before spawning FFmpeg", async () => {
+  const res = await engine.request(`/remux?url=${enc("https://1.1.1.1/a.mkv")}&start=-5&token=${engine.token}`);
+  assert.equal(res.status, 400);
+});
+
+test("/engine advertises probe / seek / replace capabilities", async () => {
+  const info = JSON.parse((await engine.request("/engine")).text);
+  assert.equal(info.remuxReplaces, true);
+  assert.equal(info.remuxSeek, true);
+  assert.equal(typeof info.probe, "boolean");
+  assert.equal(info.probePath, "/probe?url=");
+});
